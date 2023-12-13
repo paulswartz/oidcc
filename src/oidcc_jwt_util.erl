@@ -12,6 +12,7 @@
 
 -export([client_secret_oct_keys/2]).
 -export([encrypt/4]).
+-export([decrypt_if_needed/4]).
 -export([evaluate_for_all_keys/2]).
 -export([merge_jwks/2]).
 -export([refresh_jwks_fun/1]).
@@ -216,6 +217,70 @@ sign(Jwt, Jwk, [Algorithm | RestAlgorithms], JwsFields0) ->
         {ok, Token}
     else
         _ -> sign(Jwt, Jwk, RestAlgorithms, JwsFields0)
+    end.
+
+%% @private
+-spec decrypt_if_needed(
+    Jwt :: binary(),
+    Jwk :: jose_jwk:key(),
+    SupportedAlgorithms :: [binary()] | undefined,
+    SupportedEncValues :: [binary()] | undefined
+) ->
+    {ok, binary()} | {error, no_supported_alg_or_key}.
+decrypt_if_needed(Jwt, Jwk, SupportedAlgorithms, SupportedEncValues) ->
+    case jose_jwt:peek_protectec(Jwt) of
+        #{<<"alg">> := _, <<"enc">> := _} ->
+            case decrypt(Jwt, Jwk, SupportedAlgorithms, SupportedEncValues) of
+                {ok, {DecryptedToken, _}} ->
+                    {ok, DecryptedToken};
+                {error, Reason} ->
+                    {error, Reason}
+            end;
+        _ ->
+            {ok, Jwt}
+    end.
+
+-spec decrypt(
+    Jwt :: binary(),
+    Jwk :: jose_jwk:key(),
+    SupportedAlgorithms :: [binary()] | undefined,
+    SupportedEncValues :: [binary()] | undefined
+) ->
+    {ok, binary()} | {error, error()}.
+decrypt(_Jwt, _Jwk, undefined, _SupportedEncValues) ->
+    {error, no_supported_alg_or_key};
+decrypt(_Jwt, _Jwk, _SupportedAlgorithms, undefined) ->
+    {error, no_supported_alg_or_key};
+decrypt(Jwt, Jwk, SupportedAlgorithms, SupportedEncValues) ->
+    maybe
+        #{<<"alg">> := JwtAlg, <<"enc">> := JwtEnc} = JweParams ?= jose_jwt:peek_protected(Jwt),
+        ok ?= verify_in_list(JwtAlg, SupportedAlgorithms),
+        ok ?= verify_in_list(JwtEnc, SupportedEncValues),
+        Kid = maps:get(<<"kid">>, JweParams),
+        Jwe = jose_jwe:from(JweParams),
+        EncryptionCallback = fun
+            (#jose_jwk{fields = #{<<"use">> := <<"enc">>}} = Key) ->
+                try
+                    {_Jws, Token} = jose_jwk:block_decrypt(Jwt, Jwe, Key),
+                    {ok, Token}
+                catch
+                    error:{not_supported, _Alg} when Kid =:= undefined -> {error, no_matching_key};
+                    error:{not_supported, _Alg} -> {error, {no_matching_key_with_kid, Kid}}
+                end;
+            (_Key) when Kid =:= undefined ->
+                {error, no_matching_key};
+            (_Key) ->
+                {error, {no_matching_key_with_kid, Kid}}
+        end,
+        evaluate_for_all_keys(Jwk, EncryptionCallback)
+    end.
+
+verify_in_list(Value, List) ->
+    case lists:member(Value, List) of
+        true ->
+            ok;
+        false ->
+            {error, no_matching_key}
     end.
 
 %% @private

@@ -163,6 +163,53 @@ defmodule Oidcc.Token do
   end
 
   @doc """
+  retrieve the token using the JARM received before and directly validate
+  the result.
+
+  the response was sent to the local endpoint by the OpenId Connect provider,
+  using redirects
+
+  ## Examples
+
+      iex> {:ok, pid} =
+      ...>   Oidcc.ProviderConfiguration.Worker.start_link(%{
+      ...>     issuer: "https://api.login.yahoo.com"
+      ...>   })
+      ...>
+      ...> {:ok, client_context} =
+      ...>   Oidcc.ClientContext.from_configuration_worker(
+      ...>     pid,
+      ...>     "client_id",
+      ...>     "client_secret"
+      ...>   )
+      ...>
+      ...> # Get auth_code fromm redirect
+      ...> response = "JWT"
+      ...>
+      ...> Oidcc.Token.retrieve_jarm(
+      ...>   response,
+      ...>   client_context,
+      ...>   %{redirect_uri: "https://my.server/return"}
+      ...> )
+      ...> # => {:ok, %Oidcc.Token{}}
+
+  """
+  @doc since: "3.2.0"
+  @spec retrieve_jarm(
+          response :: String.t(),
+          client_context :: ClientContext.t(),
+          opts :: :oidcc_token.retrieve_opts()
+        ) ::
+          {:ok, t()} | {:error, :oidcc_token.error()}
+  def retrieve_jarm(response, client_context, opts) do
+    client_context = ClientContext.struct_to_record(client_context)
+
+    response
+    |> :oidcc_token.retrieve_jarm(client_context, opts)
+    |> normalize_token_response()
+  end
+
+  @doc """
   Refresh Token
 
   For a high level interface using `Oidcc.ProviderConfiguration.Worker`
