@@ -125,7 +125,7 @@ retrieve(AccessToken, ClientContext, Opts) when is_binary(AccessToken) ->
         issuer = Issuer
     } = Configuration,
 
-    Header = [oidcc_http_util:bearer_auth_header(AccessToken)],
+    Header = oidcc_auth_util:add_authorization_header(AccessToken, get, Endpoint, ClientContext),
 
     Request = {Endpoint, Header},
     RequestOpts = maps:get(request_opts, Opts, #{}),

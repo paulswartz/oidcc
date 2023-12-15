@@ -816,13 +816,12 @@ validate_id_token(IdToken, ClientContext, Nonce) ->
 
 -spec verify_aud_claim(Claims, ClientId) -> ok | {error, error()} when
     Claims :: oidcc_jwt_util:claims(), ClientId :: binary().
-verify_aud_claim(#{<<"aud">> := Audience} = Claims, ClientId) when is_list(Audience) ->
-    case lists:member(ClientId, Audience) of
-        true -> ok;
-        false -> {error, {missing_claim, {<<"aud">>, ClientId}, Claims}}
+verify_aud_claim(#{<<"aud">> := Audience} = Claims, ClientId) ->
+    case Audience of
+        ClientId -> ok;
+        [ClientId] -> ok;
+        _ -> {error, {missing_claim, {<<"aud">>, ClientId}, Claims}}
     end;
-verify_aud_claim(#{<<"aud">> := ClientId}, ClientId) ->
-    ok;
 verify_aud_claim(Claims, ClientId) ->
     {error, {missing_claim, {<<"aud">>, ClientId}, Claims}}.
 
@@ -831,7 +830,7 @@ verify_aud_claim(Claims, ClientId) ->
 verify_azp_claim(#{<<"azp">> := ClientId}, ClientId) ->
     ok;
 verify_azp_claim(#{<<"azp">> := _Azp} = Claims, ClientId) ->
-    {missing_claim, {<<"azp">>, ClientId}, Claims};
+    {error, {missing_claim, {<<"azp">>, ClientId}, Claims}};
 verify_azp_claim(_Claims, _ClientId) ->
     ok.
 
@@ -845,7 +844,9 @@ verify_exp_claim(#{<<"exp">> := Expiry}) ->
     case erlang:system_time(second) > Expiry + MaxClockSkew of
         true -> {error, token_expired};
         false -> ok
-    end.
+    end;
+verify_exp_claim(Claims) ->
+    {error, {missing_claim, <<"exp">>, Claims}}.
 
 -spec verify_nbf_claim(Claims) -> ok | {error, error()} when Claims :: oidcc_jwt_util:claims().
 verify_nbf_claim(#{<<"nbf">> := Expiry}) ->
@@ -914,10 +915,11 @@ retrieve_a_token(QsBodyIn, PkceVerifier, ClientContext, Opts, TelemetryOpts, Aut
         end,
 
     maybe
-        {ok, {Body, Header}} ?=
+        {ok, {Body, Header1}} ?=
             oidcc_auth_util:add_client_authentication(
                 QsBody, Header0, SupportedAuthMethods, SigningAlgs, Opts, ClientContext
             ),
+        Header = oidcc_auth_util:add_dpop_proof(Header1, post, Endpoint, ClientContext),
         Request =
             {Endpoint, Header, "application/x-www-form-urlencoded", uri_string:compose_query(Body)},
         RequestOpts = maps:get(request_opts, Opts, #{}),

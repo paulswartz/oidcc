@@ -19,6 +19,8 @@
 -type error() :: no_supported_auth_method.
 
 -export([add_client_authentication/6]).
+-export([add_dpop_proof/4]).
+-export([add_authorization_header/4]).
 
 %% @private
 -spec add_client_authentication(
@@ -158,7 +160,7 @@ add_authentication(
             {error, auth_method_not_possible}
     end;
 add_authentication(
-    QsBodyList,
+    QsBodyList0,
     Header,
     private_key_jwt,
     AllowAlgorithms,
@@ -174,6 +176,7 @@ add_authentication(
         #jose_jwk{} ?= ClientJwks,
         {ok, ClientAssertion} ?=
             signed_client_assertion(AllowAlgorithms, Opts, ClientContext, ClientJwks),
+        QsBodyList = [{<<"dpop_jkt">>, jose_jwk:thumbprint(ClientJwks)} | QsBodyList0],
         {ok, add_jwt_bearer_assertion(ClientAssertion, QsBodyList, Header, ClientContext)}
     else
         _ ->
@@ -250,6 +253,105 @@ add_jwt_bearer_assertion(ClientAssertion, Body, Header, ClientContext) ->
         ],
         Header
     }.
+
+%% @private
+-spec add_dpop_proof(Header, Method, Endpoint, ClientContext) -> Header when
+    Header :: [oidcc_http_util:http_header()],
+    Method :: post | get,
+    Endpoint :: uri_string:uri_string(),
+    ClientContext :: oidcc_client_context:t().
+add_dpop_proof(Header, Method, Endpoint, #oidcc_client_context{
+    client_jwks = #jose_jwk{} = ClientJwks,
+    provider_configuration = #oidcc_provider_configuration{
+        dpop_signing_alg_values_supported = [_ | _] = SigningAlgSupported
+    }
+}) ->
+    MaxClockSkew =
+        case application:get_env(oidcc, max_clock_skew) of
+            undefined -> 0;
+            {ok, ClockSkew} -> ClockSkew
+        end,
+    HtmClaim =
+        case Method of
+            post -> <<"POST">>;
+            get -> <<"GET">>
+        end,
+    Claims = #{
+        <<"jti">> => random_string(32),
+        <<"htm">> => HtmClaim,
+        <<"htu">> => iolist_to_binary(Endpoint),
+        <<"iat">> => os:system_time(seconds),
+        <<"exp">> => os:system_time(seconds) + 30,
+        <<"nbf">> => os:system_time(seconds) - MaxClockSkew
+    },
+    Jwt = jose_jwt:from(Claims),
+    {_, PublicJwk} = jose_jwk:to_public_map(ClientJwks),
+    case
+        oidcc_jwt_util:sign(Jwt, ClientJwks, SigningAlgSupported, #{
+            <<"typ">> => <<"dpop+jwt">>, <<"jwk">> => PublicJwk
+        })
+    of
+        {ok, SignedRequestObject} ->
+            [{"dpop", SignedRequestObject} | Header];
+        {error, no_supported_alg_or_key} ->
+            Header
+    end;
+add_dpop_proof(Header, _Method, _Endpoint, _ClientContext) ->
+    Header.
+
+%% @private
+-spec add_authorization_header(AccessToken, Method, Endpoint, ClientContext) -> Header when
+    AccessToken :: binary(),
+    Method :: post | get,
+    Endpoint :: uri_string:uri_string(),
+    ClientContext :: oidcc_client_context:t(),
+    Header :: [oidcc_http_util:http_header()].
+add_authorization_header(AccessToken, Method, Endpoint, #oidcc_client_context{
+    client_jwks = #jose_jwk{} = ClientJwks,
+    provider_configuration = #oidcc_provider_configuration{
+        dpop_signing_alg_values_supported = [_ | _] = SigningAlgSupported
+    }
+}) when is_binary(AccessToken) ->
+    MaxClockSkew =
+        case application:get_env(oidcc, max_clock_skew) of
+            undefined -> 0;
+            {ok, ClockSkew} -> ClockSkew
+        end,
+    HtmClaim =
+        case Method of
+            post -> <<"POST">>;
+            get -> <<"GET">>
+        end,
+    Claims = #{
+        <<"jti">> => random_string(32),
+        <<"htm">> => HtmClaim,
+        <<"htu">> => iolist_to_binary(Endpoint),
+        <<"iat">> => os:system_time(seconds),
+        <<"exp">> => os:system_time(seconds) + 30,
+        <<"nbf">> => os:system_time(seconds) - MaxClockSkew,
+        <<"ath">> => base64:encode(crypto:hash(sha256, AccessToken), #{
+            mode => urlsafe, padding => false
+        })
+    },
+    Jwt = jose_jwt:from(Claims),
+    {_, PublicJwk} = jose_jwk:to_public_map(ClientJwks),
+    case
+        oidcc_jwt_util:sign(Jwt, ClientJwks, SigningAlgSupported, #{
+            <<"typ">> => <<"dpop+jwt">>, <<"jwk">> => PublicJwk
+        })
+    of
+        {ok, SignedRequestObject} ->
+            [
+                {"authorization", [<<"DPoP ">>, AccessToken]},
+                {"dpop", SignedRequestObject}
+            ];
+        {error, no_supported_alg_or_key} ->
+            [oidcc_http_util:bearer_auth_header(AccessToken)]
+    end;
+add_authorization_header(AccessToken, _Method, _Endpoint, _ClientContext) when
+    is_binary(AccessToken)
+->
+    [oidcc_http_util:bearer_auth_header(AccessToken)].
 
 -spec random_string(Bytes :: pos_integer()) -> binary().
 random_string(Bytes) ->
